@@ -106,8 +106,8 @@ impl State for Suspending {
     fn execute(&mut self) {
         // If we've gotten the system signal, and timer 
         // hasn't been started, start the shutdown timer
-
-        if self.started_at == 0 {
+        if self.system_signal == true && self.started_at == 0 {
+            info!("suspending: starting shutdown timer");
             self.started_at = AtomicSystemTime::now_millis();
         } 
     }
@@ -179,8 +179,11 @@ impl Into<Booted> for Starting {
 
 impl Into<Suspending> for Booted {
     fn into(self) -> Suspending {
+        // System signal is passed here as if the host initiated the
+        // shutdown, we don't need (or want) to wait for another signal
+        // from the host.  We know it is going down.
         Suspending {
-            system_signal: false,
+            system_signal: self.system_signal,
             started_at: 0,
         }
     }
@@ -216,7 +219,8 @@ impl Transition<Suspending> for Booted {
 impl Transition<Suspended> for Suspending {
     fn guard(&self) -> TransitGuard {
         let elapsed = AtomicSystemTime::now_millis() - self.started_at;
-        if elapsed >= HALTING_TIME {
+
+        if self.started_at > 0 && elapsed >= HALTING_TIME {
             TransitGuard::Transit
         } else {
             TransitGuard::Remain
@@ -237,7 +241,8 @@ impl Transition<Starting> for Suspended {
 impl Transition<Booted> for Starting {
     fn guard(&self) -> TransitGuard {
         let elapsed = AtomicSystemTime::now_millis() - self.started_at;
-        if elapsed >= BOOTING_TIME {
+
+        if self.started_at > 0 && elapsed >= BOOTING_TIME {
             TransitGuard::Transit
         } else {
             TransitGuard::Remain
@@ -325,16 +330,20 @@ fn main() -> anyhow::Result<()> {
     let button_debounce = 2000;
 
     let button_press_notify = Arc::new(AtomicBool::new(false));
+    let system_signal_notify = Arc::new(AtomicU64::new(0));
 
     {
         let mut button_on_time = 0;    
         let dbg_led_on_time = Arc::clone(&dbg_led_on_time);
+
         let button_press_notify = Arc::clone(&button_press_notify);
+        let system_signal_notify = Arc::clone(&system_signal_notify);
 
         thread::spawn(move || {
             let button = peripherals.pins.gpio2.into_input().unwrap();
+            let signal = peripherals.pins.gpio9.into_input().unwrap();
 
-            info!("button monitor thread start");
+            info!("input monitor thread starting");
 
             loop {
                 if button.is_low().unwrap() { 
@@ -351,6 +360,20 @@ fn main() -> anyhow::Result<()> {
 
                     if button_press_notify.load(Ordering::Relaxed) == false {
                         button_press_notify.store(true, Ordering::Relaxed);
+                    }
+                }
+
+                if signal.is_low().unwrap() { 
+                    if system_signal_notify.load(Ordering::Relaxed) == 0 {
+                        info!("pushing system signal");
+                        system_signal_notify.store(1, Ordering::Relaxed);
+                    }
+                } else {
+                    // Signal has been released, and has been passed on
+                    // We can reset back to the default state
+                    if system_signal_notify.load(Ordering::Relaxed) == 2 {
+                        info!("clearing system signal");
+                        system_signal_notify.store(0, Ordering::Relaxed);
                     }
                 }
 
@@ -372,6 +395,22 @@ fn main() -> anyhow::Result<()> {
             if IsState::<Suspended>::is_state(&fsm) {
                 PushMessage::<Suspended, ButtonPress>::push_message(&mut fsm, ButtonPress {}).unwrap();
             }
+        }
+
+        if system_signal_notify.load(Ordering::Relaxed) == 1 {
+            // Signal that we've passed on the signal
+            system_signal_notify.store(2, Ordering::Relaxed);
+            
+            // Used for host-initiated shutdowns
+            if IsState::<Booted>::is_state(&fsm) {
+                PushMessage::<Booted, SystemSignal>::push_message(&mut fsm, SystemSignal {}).unwrap();
+            }
+
+            // Used to signal that MCU-initiated shutdowns were received by the host
+            if IsState::<Suspending>::is_state(&fsm) {
+                PushMessage::<Suspending, SystemSignal>::push_message(&mut fsm, SystemSignal {}).unwrap();
+            }
+
         }
 
         // Process the state machine
