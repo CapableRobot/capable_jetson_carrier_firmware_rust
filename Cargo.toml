@@ -1,5 +1,5 @@
 [package]
-name = "capable-jetson-carrier-firmware-rust"
+name = "firmware"
 version = "0.1.0"
 authors = ["Chris Osterwood <osterwood@gmail.com>"]
 edition = "2021"
@@ -16,8 +16,12 @@ opt-level = "z"
 pio = ["esp-idf-sys/pio"]
 
 [dependencies]
-esp-idf-sys = { version = "0.31.6", features = ["binstart"] }
-
+anyhow = {version = "1", features = ["backtrace"]}
+embedded-hal = "0.2"
+esp-idf-hal = "0.38"
+esp-idf-svc = "0.42"
+esp-idf-sys = { version = "0.31", features = ["binstart"] }
+log = "0.4"
 
 [build-dependencies]
 embuild = "0.29"
