@@ -13,7 +13,8 @@ debug = true # Symbols are nice and they don't increase the size on Flash
 opt-level = "z"
 
 [features]
-pio = ["esp-idf-sys/pio"]
+default = ["native"]
+native = ["esp-idf-sys/native"]
 
 [dependencies]
 anyhow = {version = "1", features = ["backtrace"]}
