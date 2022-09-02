@@ -12,6 +12,10 @@ use embedded_hal::digital::v2::InputPin;
 use embedded_hal::digital::v2::OutputPin;
 
 use esp_idf_hal::peripherals::Peripherals;
+use esp_idf_hal::gpio;
+
+use mut_static::MutStatic;
+use lazy_static::lazy_static;
 
 mod helpers;
 use crate::helpers::atomic_esp_system_time::AtomicSystemTime;
@@ -24,6 +28,125 @@ static PWR_LED_ON_TIME: AtomicU64 = AtomicU64::new(0);
 static HALTING_TIME : u64 = 15_000;
 static BOOTING_TIME : u64 = 25_000;
 
+#[derive(PartialEq)]
+pub enum IO {
+    On,
+    Off
+}
+
+struct IOPins {
+    buffer_pin: gpio::Gpio18<gpio::Output>,
+    power_pin: gpio::Gpio10<gpio::Output>,
+    sleep_pin: gpio::Gpio7<gpio::Output>,
+    pwr_led_pin: gpio::Gpio4<gpio::Output>,
+    dbg_led_pin: gpio::Gpio19<gpio::Output>,
+    button_pin: gpio::Gpio2<gpio::Input>,
+    signal_pin: gpio::Gpio9<gpio::Input>,
+    sense_pin: gpio::Gpio8<gpio::Input>,
+}
+
+// static IOPINS: OnceCell<Mutex<IOPins>> = OnceCell::new();
+
+impl IOPins {
+    fn new() -> IOPins {
+        let peripherals = Peripherals::take().unwrap();
+        let pins = peripherals.pins;
+
+        let sense_pin = pins.gpio8.into_input().unwrap();
+        let host_on = sense_pin.is_high().unwrap();
+
+        // Default to isolation buffer off
+        let mut buffer_pin = pins.gpio18.into_output().unwrap();
+        buffer_pin.set_low().unwrap();
+
+        let mut power_pin = pins.gpio10.into_output().unwrap();
+
+        // If host is on (e.g. 3v3 rail is on) then keep power rail on
+        if host_on {
+            power_pin.set_high().unwrap();
+            info!("iopins: host is on");
+        } else {
+            power_pin.set_low().unwrap();
+            info!("iopins: host is off");
+        }
+
+        let mut sleep_pin = pins.gpio7.into_output().unwrap();
+        sleep_pin.set_high().unwrap();
+
+        IOPins {
+            buffer_pin: buffer_pin,
+            power_pin: power_pin,
+            sleep_pin: sleep_pin,
+            pwr_led_pin: pins.gpio4.into_output().unwrap(),
+            dbg_led_pin: pins.gpio19.into_output().unwrap(),
+            button_pin: pins.gpio2.into_input().unwrap(),
+            signal_pin: pins.gpio9.into_input().unwrap(),
+            sense_pin: sense_pin,
+        }
+    }
+
+    fn buffer_connect(&mut self) {
+        self.buffer_pin.set_high().unwrap();
+    }
+
+    fn buffer_isolate(&mut self) {
+        self.buffer_pin.set_low().unwrap();
+    }
+
+    fn host_sleep_wake(&mut self, state:bool) {
+        if state {
+            self.sleep_pin.set_high().unwrap();
+        } else {
+            self.sleep_pin.set_low().unwrap();    
+        }
+    }
+
+    fn host_power(&mut self, state:bool) {
+        if state {
+            self.power_pin.set_high().unwrap();
+        } else {
+            self.power_pin.set_low().unwrap();    
+        }
+    }
+
+    fn power_led(&mut self, state:IO) {
+        if state == IO::On {
+            self.pwr_led_pin.set_high().unwrap();
+        } else {
+            self.pwr_led_pin.set_low().unwrap();    
+        }
+    }
+
+    fn debug_led(&mut self, state:IO) {
+        if state == IO::On {
+            self.dbg_led_pin.set_low().unwrap();
+        } else {
+            self.dbg_led_pin.set_high().unwrap();    
+        }
+    }
+
+    fn is_signal_asserted(&self) -> bool {
+        self.signal_pin.is_low().unwrap()
+    }
+
+    fn is_signal_released(&self) -> bool {
+        self.signal_pin.is_high().unwrap()
+    }
+
+    fn is_button_pressed(&self) -> bool {
+        self.button_pin.is_low().unwrap()
+    }   
+
+    fn is_button_released(&self) -> bool {
+        self.button_pin.is_high().unwrap()
+    }
+}
+
+lazy_static! {
+    static ref IOPINS: MutStatic<IOPins> = {
+        MutStatic::from(IOPins::new())
+    };
+}
 
 #[derive(Debug, PartialEq)]
 pub enum TimerState {
@@ -255,7 +378,6 @@ fn trace(_log: &str) {
     // info!("{}", log);
 }
 
-
 fn main() -> anyhow::Result<()> {
     // Temporary. Will disappear once ESP-IDF 4.4 is released, but for now it is necessary to call this function once,
     // or else some patches to the runtime implemented by esp-idf-sys might not link properly.
@@ -263,10 +385,6 @@ fn main() -> anyhow::Result<()> {
     esp_idf_svc::log::EspLogger::initialize_default();
 
     info!("booted");
-
-    let peripherals = Peripherals::take().unwrap();
-
-    info!("gpio configured");
 
     let mut fsm = Logic::new();
 
@@ -282,17 +400,16 @@ fn main() -> anyhow::Result<()> {
     let dbg_led_on_time = Arc::new(AtomicU64::new(dbg_led_default_on_time));
 
     {
+        
         let dbg_led_on_time = Arc::clone(&dbg_led_on_time);
         thread::spawn(move || {
-            let mut dbg_led = peripherals.pins.gpio19.into_output().unwrap();
-            
             info!("heartbeat thread start");
 
             loop {
-                dbg_led.set_low().unwrap();
+                IOPINS.write().unwrap().debug_led(IO::On);
                 thread::sleep(Duration::from_millis(dbg_led_on_time.load(Ordering::Relaxed)));
 
-                dbg_led.set_high().unwrap();
+                IOPINS.write().unwrap().debug_led(IO::Off);
                 thread::sleep(Duration::from_millis(dbg_led_interval - dbg_led_on_time.load(Ordering::Relaxed)));
             }
         });
@@ -300,8 +417,6 @@ fn main() -> anyhow::Result<()> {
 
     {
         thread::spawn(move || {
-            let mut pwr_led = peripherals.pins.gpio4.into_output().unwrap();
-            
             info!("power LED thread start");
 
             loop {
@@ -309,17 +424,18 @@ fn main() -> anyhow::Result<()> {
                 let on_time = PWR_LED_ON_TIME.load(Ordering::Relaxed);
 
                 if on_time > 0 {
-                    pwr_led.set_high().unwrap();
+                    // pwr_led.set_high().unwrap();
+                    IOPINS.write().unwrap().power_led(IO::On);
                     thread::sleep(Duration::from_millis(on_time));
                 }
 
                 if off_time > 0 {
-                    pwr_led.set_low().unwrap();
+                    IOPINS.write().unwrap().power_led(IO::Off);
                     thread::sleep(Duration::from_millis(off_time));
                 } 
 
                 if off_time == 0 && on_time == 0 {
-                    pwr_led.set_low().unwrap();
+                    IOPINS.write().unwrap().power_led(IO::On);
                     thread::sleep(Duration::from_millis(100));  
                 }
             }
@@ -340,13 +456,10 @@ fn main() -> anyhow::Result<()> {
         let system_signal_notify = Arc::clone(&system_signal_notify);
 
         thread::spawn(move || {
-            let button = peripherals.pins.gpio2.into_input().unwrap();
-            let signal = peripherals.pins.gpio9.into_input().unwrap();
-
             info!("input monitor thread starting");
 
             loop {
-                if button.is_low().unwrap() { 
+                if IOPINS.write().unwrap().is_button_pressed() { 
                     button_on_time += button_interval;
                 } else {
                     button_on_time = 0;
@@ -363,7 +476,7 @@ fn main() -> anyhow::Result<()> {
                     }
                 }
 
-                if signal.is_low().unwrap() { 
+                if IOPINS.write().unwrap().is_signal_asserted() { 
                     if system_signal_notify.load(Ordering::Relaxed) == 0 {
                         info!("pushing system signal");
                         system_signal_notify.store(1, Ordering::Relaxed);

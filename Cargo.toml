@@ -23,7 +23,9 @@ embedded-svc = "0.22.1"
 esp-idf-hal = "0.38"
 esp-idf-svc = "0.42"
 esp-idf-sys = { version = "0.31", features = ["binstart"] }
+lazy_static = "1.4"
 log = "0.4"
+mut_static = "5.0"
 sfsm = {version = "0.4", features = ["trace", "trace-messages", "trace-steps"]}
 
 [build-dependencies]
