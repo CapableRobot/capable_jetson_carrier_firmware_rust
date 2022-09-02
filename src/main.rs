@@ -45,8 +45,6 @@ struct IOPins {
     sense_pin: gpio::Gpio8<gpio::Input>,
 }
 
-// static IOPINS: OnceCell<Mutex<IOPins>> = OnceCell::new();
-
 impl IOPins {
     fn new() -> IOPins {
         let peripherals = Peripherals::take().unwrap();
@@ -93,16 +91,16 @@ impl IOPins {
         self.buffer_pin.set_low().unwrap();
     }
 
-    fn host_sleep_wake(&mut self, state:bool) {
-        if state {
-            self.sleep_pin.set_high().unwrap();
-        } else {
-            self.sleep_pin.set_low().unwrap();    
-        }
+    fn host_sleep_assert(&mut self) {
+        self.sleep_pin.set_low().unwrap();    
     }
 
-    fn host_power(&mut self, state:bool) {
-        if state {
+    fn host_sleep_release(&mut self) {
+        self.sleep_pin.set_high().unwrap();    
+    }    
+
+    fn host_power(&mut self, state:IO) {
+        if state == IO::On {
             self.power_pin.set_high().unwrap();
         } else {
             self.power_pin.set_low().unwrap();    
@@ -212,6 +210,7 @@ impl State for Booted {
         PWR_LED_ON_TIME.store(100, Ordering::Relaxed);
 
         // Turn on isolation buffer
+        IOPINS.write().unwrap().buffer_connect();
     }
 }
 
@@ -222,8 +221,10 @@ impl State for Suspending {
         PWR_LED_ON_TIME.store(100, Ordering::Relaxed);
 
         // Disable buffer, so that ESP continues to run when SOM shuts down
+        IOPINS.write().unwrap().buffer_isolate();
 
         // Send power off signal to SOM
+        IOPINS.write().unwrap().host_sleep_assert();
     }
 
     fn execute(&mut self) {
@@ -243,8 +244,10 @@ impl State for Suspended {
         PWR_LED_ON_TIME.store(0, Ordering::Relaxed);
 
         // Turn off SOM regulators
+        IOPINS.write().unwrap().host_power(IO::Off);
 
         // Release assertion on power signal
+        IOPINS.write().unwrap().host_sleep_release();
     }
 }
 
@@ -255,6 +258,7 @@ impl State for Starting {
         PWR_LED_ON_TIME.store(100, Ordering::Relaxed);
 
         // Turn on SOM regulators
+        IOPINS.write().unwrap().host_power(IO::On);
 
         // Start booting timer
         self.started_at = AtomicSystemTime::now_millis();
