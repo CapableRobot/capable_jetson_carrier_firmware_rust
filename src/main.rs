@@ -34,6 +34,7 @@ pub enum IO {
     Off
 }
 
+
 struct IOPins {
     buffer_pin: gpio::Gpio18<gpio::Output>,
     power_pin: gpio::Gpio10<gpio::Output>,
@@ -50,26 +51,28 @@ impl IOPins {
         let peripherals = Peripherals::take().unwrap();
         let pins = peripherals.pins;
 
+        // Has to be set to open-drain to prevent and initial (short)
+        // high output level.  If that were to occur when the host
+        // is off, the buffer would connec the CHIP_EN pin thru to
+        // a low level signal on the host side.
+        let mut buffer_pin = pins.gpio18.into_output_od().unwrap();
+
         let sense_pin = pins.gpio8.into_input().unwrap();
         let host_on = sense_pin.is_high().unwrap();
 
-        // Default to isolation buffer off
-        let mut buffer_pin = pins.gpio18.into_output().unwrap();
-        buffer_pin.set_low().unwrap();
-
         let mut power_pin = pins.gpio10.into_output().unwrap();
+        let mut sleep_pin = pins.gpio7.into_output().unwrap();
 
         // If host is on (e.g. 3v3 rail is on) then keep power rail on
         if host_on {
             power_pin.set_high().unwrap();
+            sleep_pin.set_high().unwrap();
             info!("iopins: host is on");
         } else {
             power_pin.set_low().unwrap();
+            sleep_pin.set_low().unwrap();
             info!("iopins: host is off");
         }
-
-        let mut sleep_pin = pins.gpio7.into_output().unwrap();
-        sleep_pin.set_high().unwrap();
 
         IOPins {
             buffer_pin: buffer_pin,
@@ -138,6 +141,10 @@ impl IOPins {
     fn is_button_released(&self) -> bool {
         self.button_pin.is_high().unwrap()
     }
+
+    fn is_host_on(&self) -> bool {
+        self.sense_pin.is_high().unwrap()
+    }
 }
 
 lazy_static! {
@@ -154,6 +161,11 @@ pub enum TimerState {
 }
 
 // State structs
+#[derive(Debug)]
+struct Init {
+    host_booted: bool,
+}
+
 #[derive(Debug)]
 struct Booted {
     button_press: bool,
@@ -177,9 +189,11 @@ struct Starting {
 }
 
 add_state_machine!(Logic,
-    Booted,
-    [Booted, Suspending, Suspended, Starting],
+    Init,
+    [Init, Booted, Suspending, Suspended, Starting],
     [
+        Init => Booted,
+        Init => Suspended,
         Booted => Suspending,
         Suspending => Suspended,
         Suspended => Starting,
@@ -202,6 +216,8 @@ add_messages!(Logic,
         SystemSignal -> Suspending,
     ]
 );
+
+derive_state!(Init);
 
 impl State for Booted {
     fn entry(&mut self) {
@@ -294,6 +310,23 @@ impl ReceiveMessage<SystemSignal> for Suspending {
     }
 }
 
+impl Into<Booted> for Init {
+    fn into(self) -> Booted {
+        Booted {
+            button_press: false,
+            system_signal: false,
+        }
+    }
+}
+
+impl Into<Suspended> for Init {
+    fn into(self) -> Suspended {
+        Suspended {
+            button_press: false,
+        }
+    }
+}
+
 
 impl Into<Booted> for Starting {
     fn into(self) -> Booted {
@@ -328,6 +361,26 @@ impl Into<Starting> for Suspended {
     fn into(self) -> Starting {
         Starting {
             started_at: 0,
+        }
+    }
+}
+
+impl Transition<Booted> for Init {
+    fn guard(&self) -> TransitGuard {
+        if self.host_booted {
+            TransitGuard::Transit
+        } else {
+            TransitGuard::Remain
+        }
+    }
+}
+
+impl Transition<Suspended> for Init {
+    fn guard(&self) -> TransitGuard {
+        if self.host_booted {
+            TransitGuard::Remain
+        } else {
+            TransitGuard::Transit
         }
     }
 }
@@ -390,15 +443,17 @@ fn main() -> anyhow::Result<()> {
 
     info!("booted");
 
+    // Setup default IO pin state
+    IOPINS.write().unwrap();
+
     let mut fsm = Logic::new();
 
-    let state = Booted {
-        button_press: false,
-        system_signal: false,
+    let state = Init {
+        host_booted: IOPINS.write().unwrap().is_host_on(),
     };
     fsm.start(state).unwrap();
-
-
+     
+     
     let dbg_led_interval = 1000;
     let dbg_led_default_on_time = 50;
     let dbg_led_on_time = Arc::new(AtomicU64::new(dbg_led_default_on_time));
