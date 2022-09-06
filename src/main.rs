@@ -13,6 +13,7 @@ use embedded_hal::digital::v2::OutputPin;
 
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::gpio;
+use esp_idf_sys as idf;
 
 use mut_static::MutStatic;
 use lazy_static::lazy_static;
@@ -35,8 +36,9 @@ pub enum IO {
 }
 
 
+static BUFFER_PIN: i32 = 18;
+
 struct IOPins {
-    buffer_pin: gpio::Gpio18<gpio::Output>,
     power_pin: gpio::Gpio10<gpio::Output>,
     sleep_pin: gpio::Gpio7<gpio::Output>,
     pwr_led_pin: gpio::Gpio4<gpio::Output>,
@@ -51,11 +53,16 @@ impl IOPins {
         let peripherals = Peripherals::take().unwrap();
         let pins = peripherals.pins;
 
-        // Has to be set to open-drain to prevent and initial (short)
-        // high output level.  If that were to occur when the host
-        // is off, the buffer would connec the CHIP_EN pin thru to
-        // a low level signal on the host side.
-        let mut buffer_pin = pins.gpio18.into_output_od().unwrap();
+        // Changing from esp_idf_hal functions to lower level IDF unsafe
+        // functions lowers the length of the high pulse on BUFFER_PIN from
+        // 9 ms to around 1.4 us (6400 times shorter).  Unclear exactly what is
+        // causing the 1.4 us pulse (as output level should) be zero before
+        // the output is turned on, but it is short enought to not cause the
+        // chip to self-reset (still allows control over the buffer control pin)
+        unsafe { 
+            idf::gpio_set_level(BUFFER_PIN, 0);
+            idf::gpio_set_direction(BUFFER_PIN, idf::GPIO_MODE_DEF_OUTPUT); 
+        }
 
         let sense_pin = pins.gpio8.into_input().unwrap();
         let host_on = sense_pin.is_high().unwrap();
@@ -75,7 +82,6 @@ impl IOPins {
         }
 
         IOPins {
-            buffer_pin: buffer_pin,
             power_pin: power_pin,
             sleep_pin: sleep_pin,
             pwr_led_pin: pins.gpio4.into_output().unwrap(),
@@ -87,11 +93,11 @@ impl IOPins {
     }
 
     fn buffer_connect(&mut self) {
-        self.buffer_pin.set_high().unwrap();
+        unsafe {idf::gpio_set_level(BUFFER_PIN, 1);}
     }
 
     fn buffer_isolate(&mut self) {
-        self.buffer_pin.set_low().unwrap();
+        unsafe {idf::gpio_set_level(BUFFER_PIN, 0);}
     }
 
     fn host_sleep_assert(&mut self) {
@@ -453,7 +459,7 @@ fn main() -> anyhow::Result<()> {
     };
     fsm.start(state).unwrap();
      
-     
+
     let dbg_led_interval = 1000;
     let dbg_led_default_on_time = 50;
     let dbg_led_on_time = Arc::new(AtomicU64::new(dbg_led_default_on_time));
