@@ -1,0 +1,121 @@
+#!/usr/bin/env python3.7
+
+import time
+import argparse
+import sys
+import os
+import subprocess
+
+DELAY = 0.01
+GPIO_ROOT = "/sys/class/gpio"
+
+NX_GPIOS = [
+    dict(num=393, name="MCU_ENABLE", desc="MCU chip enable", direction="out", default=1),
+    dict(num=422, name="MCU_SIGNAL", desc="MCU signal / bootloader selection", direction="out", default=1)
+]
+
+GPIOS = dict(NX=NX_GPIOS)
+PLATFORM = 'NX'
+
+__version__ = "0.1"
+
+if (not os.access(GPIO_ROOT + '/export', os.W_OK) or not os.access(GPIO_ROOT + '/unexport', os.W_OK)):
+    raise RuntimeError("The current user does not have permissions set to access the library functionalites."
+                       "Please configure permissions or use the root user to run this")
+
+def _run(args):
+    out = subprocess.Popen(args.split(" "), stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    stdout,stderr = out.communicate()
+    return stdout,stderr
+
+def _setup_gpios():
+    for dev in GPIOS[PLATFORM]:
+        path = "{}/gpio{}".format(GPIO_ROOT, dev['num'])
+        if os.path.exists(path):
+            print("{} : Already created".format(dev['name']))
+        else:
+            print("{} : Creating {} pin".format(dev['name'], dev['direction']))
+
+            with open("{}/export".format(GPIO_ROOT), 'w') as outfile:
+                outfile.write(str(dev['num']))
+
+            while not os.access("{}/gpio{}/value".format(GPIO_ROOT, dev['num']), os.R_OK | os.W_OK):
+                time.sleep(0.01)
+
+            with open("{}/gpio{}/direction".format(GPIO_ROOT, dev['num']), 'w') as outfile:
+                outfile.write(dev['direction'])
+
+            with open("{}/gpio{}/value".format(GPIO_ROOT, dev['num']), 'w') as outfile:
+                outfile.write(str(dev['default']))
+
+def _sys_gpio(dev, value):
+    path = "{}/gpio{}".format(GPIO_ROOT, dev['num'])
+
+    if not os.path.exists(path):
+        _setup_gpios()
+
+    if value == None:
+        stdout,_ = _run("cat {}/gpio{}/value".format(GPIO_ROOT, dev['num']))
+        print(int(stdout.strip()))
+    else:
+        with open("{}/gpio{}/value".format(GPIO_ROOT, dev['num']), 'w') as outfile:
+            outfile.write(str(value))
+
+def _gpio_cmd(name, value):
+    if value not in ['1', '0', 1, 0, None]:
+        print("ERROR: Value {} is invalid".format(value))
+        return
+
+    if name == None:
+        print("ERROR: Please specify a GPIO name:")
+        for dev in GPIOS[PLATFORM]:
+            print("  {} : {}".format(dev['name'], dev['desc']))
+        return
+
+    for dev in GPIOS[PLATFORM]:
+        if dev['name'] == name.upper():
+            _sys_gpio(dev, value)
+
+    print("ERROR: GPIO named {} is unknown".format(name))
+
+class Control:
+    def __init__(self):
+        parser = argparse.ArgumentParser(
+            description="mcutool v%s" % __version__, usage="mcutool <command> [<args>]"
+        )    
+
+        parser.add_argument('command', help='Can be one of: [bootloader reboot halt start flash signalon signaloff]')
+        args = parser.parse_args(sys.argv[1:])
+
+        getattr(self, args.command)()
+
+
+    def signalon(self):
+        _gpio_cmd("MCU_SIGNAL", 1)
+
+    def signaloff(self):
+        _gpio_cmd("MCU_SIGNAL", 0)
+
+    def bootloader(self):
+        _gpio_cmd("MCU_SIGNAL", 0)
+        time.sleep(DELAY)
+        self.reboot()
+        _gpio_cmd("MCU_SIGNAL", 1)
+        time.sleep(DELAY*10)
+
+    def reboot(self):
+        _gpio_cmd("MCU_ENABLE", 0)
+        time.sleep(DELAY)
+        _gpio_cmd("MCU_ENABLE", 1)
+        time.sleep(DELAY*10)
+
+    def halt(self):
+        _gpio_cmd("MCU_ENABLE", 0)
+        time.sleep(DELAY)
+
+    def start(self):
+        _gpio_cmd("MCU_ENABLE", 1)
+        time.sleep(DELAY)
+
+if __name__ == '__main__':
+    Control()
