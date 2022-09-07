@@ -39,7 +39,8 @@ pub enum IO {
 static BUFFER_PIN: i32 = 18;
 
 struct IOPins {
-    power_pin: gpio::Gpio10<gpio::Output>,
+    pwr_set_pin: gpio::Gpio1<gpio::Output>,
+    qdel_pin: gpio::Gpio10<gpio::Input>,
     sleep_pin: gpio::Gpio7<gpio::Output>,
     pwr_led_pin: gpio::Gpio4<gpio::Output>,
     dbg_led_pin: gpio::Gpio19<gpio::Output>,
@@ -67,22 +68,26 @@ impl IOPins {
         let sense_pin = pins.gpio8.into_input().unwrap();
         let host_on = sense_pin.is_high().unwrap();
 
-        let mut power_pin = pins.gpio10.into_output().unwrap();
+        let qdel_pin = pins.gpio10.into_input().unwrap();
         let mut sleep_pin = pins.gpio7.into_output().unwrap();
+        sleep_pin.set_high().unwrap();
+
+        let mut pwr_set_pin = pins.gpio1.into_output_od().unwrap();
 
         // If host is on (e.g. 3v3 rail is on) then keep power rail on
         if host_on {
-            power_pin.set_high().unwrap();
-            sleep_pin.set_high().unwrap();
+            // qdel_pin.set_high().unwrap();
+            // sleep_pin.set_high().unwrap();
             info!("iopins: host is on");
         } else {
-            power_pin.set_low().unwrap();
-            sleep_pin.set_low().unwrap();
+            // qdel_pin.set_low().unwrap();
+            // sleep_pin.set_low().unwrap();
             info!("iopins: host is off");
         }
 
         IOPins {
-            power_pin: power_pin,
+            pwr_set_pin: pwr_set_pin,
+            qdel_pin: qdel_pin,
             sleep_pin: sleep_pin,
             pwr_led_pin: pins.gpio4.into_output().unwrap(),
             dbg_led_pin: pins.gpio19.into_output().unwrap(),
@@ -108,12 +113,12 @@ impl IOPins {
         self.sleep_pin.set_high().unwrap();    
     }    
 
-    fn host_power(&mut self, state:IO) {
-        if state == IO::On {
-            self.power_pin.set_high().unwrap();
-        } else {
-            self.power_pin.set_low().unwrap();    
-        }
+    fn host_power_assert(&mut self) {
+        self.pwr_set_pin.set_low().unwrap();
+    }
+    
+    fn host_power_release(&mut self) {
+        self.pwr_set_pin.set_high().unwrap();    
     }
 
     fn power_led(&mut self, state:IO) {
@@ -151,6 +156,14 @@ impl IOPins {
     fn is_host_on(&self) -> bool {
         self.sense_pin.is_high().unwrap()
     }
+
+    fn is_host_off(&self) -> bool {
+        self.sense_pin.is_low().unwrap()
+    }
+
+    fn is_qdel_on(&self) -> bool {
+        self.qdel_pin.is_high().unwrap()   
+    }
 }
 
 lazy_static! {
@@ -181,7 +194,6 @@ struct Booted {
 #[derive(Debug)]
 struct Suspending {
     system_signal: bool,
-    started_at: u64,
 }
 
 #[derive(Debug)]
@@ -233,6 +245,9 @@ impl State for Booted {
 
         // Turn on isolation buffer
         IOPINS.write().unwrap().buffer_connect();
+
+        // Ensure that power set pin is released
+        IOPINS.write().unwrap().host_power_release();
     }
 }
 
@@ -248,25 +263,12 @@ impl State for Suspending {
         // Send power off signal to SOM
         IOPINS.write().unwrap().host_sleep_assert();
     }
-
-    fn execute(&mut self) {
-        // If we've gotten the system signal, and timer 
-        // hasn't been started, start the shutdown timer
-        if self.system_signal == true && self.started_at == 0 {
-            info!("suspending: starting shutdown timer");
-            self.started_at = AtomicSystemTime::now_millis();
-        } 
-    }
-
 }
 
 impl State for Suspended {
     fn entry(&mut self) {
         info!("suspended: entry");
         PWR_LED_ON_TIME.store(0, Ordering::Relaxed);
-
-        // Turn off SOM regulators
-        IOPINS.write().unwrap().host_power(IO::Off);
 
         // Release assertion on power signal
         IOPINS.write().unwrap().host_sleep_release();
@@ -280,7 +282,7 @@ impl State for Starting {
         PWR_LED_ON_TIME.store(100, Ordering::Relaxed);
 
         // Turn on SOM regulators
-        IOPINS.write().unwrap().host_power(IO::On);
+        IOPINS.write().unwrap().host_power_assert();
 
         // Start booting timer
         self.started_at = AtomicSystemTime::now_millis();
@@ -350,7 +352,6 @@ impl Into<Suspending> for Booted {
         // from the host.  We know it is going down.
         Suspending {
             system_signal: self.system_signal,
-            started_at: 0,
         }
     }
 }
@@ -404,9 +405,7 @@ impl Transition<Suspending> for Booted {
 
 impl Transition<Suspended> for Suspending {
     fn guard(&self) -> TransitGuard {
-        let elapsed = AtomicSystemTime::now_millis() - self.started_at;
-
-        if self.started_at > 0 && elapsed >= HALTING_TIME {
+        if IOPINS.write().unwrap().is_host_off() {
             TransitGuard::Transit
         } else {
             TransitGuard::Remain
