@@ -19,6 +19,8 @@ PLATFORM = 'NX'
 
 __version__ = "0.1"
 
+PORT = "/dev/ttyTHS0"
+
 if (not os.access(GPIO_ROOT + '/export', os.W_OK) or not os.access(GPIO_ROOT + '/unexport', os.W_OK)):
     raise RuntimeError("The current user does not have permissions set to access the library functionalites."
                        "Please configure permissions or use the root user to run this")
@@ -75,6 +77,7 @@ def _gpio_cmd(name, value):
     for dev in GPIOS[PLATFORM]:
         if dev['name'] == name.upper():
             _sys_gpio(dev, value)
+            return
 
     print("ERROR: GPIO named {} is unknown".format(name))
 
@@ -116,6 +119,21 @@ class Control:
     def start(self):
         _gpio_cmd("MCU_ENABLE", 1)
         time.sleep(DELAY)
+
+    def flash(self):
+        print("... entering bootloader ...")
+        self.bootloader()
+
+        print("... flashing microcontroller ...")
+        stdout,_ = _run("espflash {} firmware.elf".format(PORT))
+
+        for line in stdout.decode("utf-8").splitlines():
+            line = line.strip()
+            if len(line) > 0:
+                print("    " + line)
+
+        print("... rebooting microcontroller ...")
+        self.reboot()
 
 if __name__ == '__main__':
     Control()
