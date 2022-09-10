@@ -11,7 +11,8 @@ GPIO_ROOT = "/sys/class/gpio"
 
 NX_GPIOS = [
     dict(num=393, name="MCU_ENABLE", desc="MCU chip enable", direction="out", default=1),
-    dict(num=422, name="MCU_SIGNAL", desc="MCU signal / bootloader selection", direction="out", default=1)
+    dict(num=422, name="MCU_SIGNAL", desc="MCU signal / bootloader selection", direction="out", default=1),
+    dict(num=421, name="MCU_BUFFER", desc="MCU buffer enable", direction="out", default=1),
 ]
 
 GPIOS = dict(NX=NX_GPIOS)
@@ -90,6 +91,11 @@ class Control:
         parser.add_argument('command', help='Can be one of: [bootloader reboot halt start flash signalon signaloff]')
         args = parser.parse_args(sys.argv[1:])
 
+        if args.command == 'signaloff':
+            self.bufferisolate()
+        else:
+            self.bufferconnect()
+
         getattr(self, args.command)()
 
 
@@ -118,6 +124,14 @@ class Control:
 
     def start(self):
         _gpio_cmd("MCU_ENABLE", 1)
+        time.sleep(DELAY)
+
+    def bufferconnect(self):
+        _gpio_cmd("MCU_BUFFER", 1)
+        time.sleep(DELAY)
+
+    def bufferisolate(self):
+        _gpio_cmd("MCU_BUFFER", 0)
         time.sleep(DELAY)
 
     def flash(self):
