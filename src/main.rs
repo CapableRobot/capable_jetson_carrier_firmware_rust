@@ -10,9 +10,11 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use embedded_hal::digital::v2::InputPin;
 use embedded_hal::digital::v2::OutputPin;
+use embedded_hal::digital::v2::StatefulOutputPin;
 
 use esp_idf_hal::peripherals::Peripherals;
 use esp_idf_hal::gpio;
+use esp_idf_hal::gpio::Pull;
 use esp_idf_sys as idf;
 
 use mut_static::MutStatic;
@@ -40,7 +42,7 @@ static BUFFER_PIN: i32 = 18;
 
 struct IOPins {
     pwr_set_pin: gpio::Gpio1<gpio::Output>,
-    qdel_pin: gpio::Gpio10<gpio::Input>,
+    qdel_pin: gpio::Gpio10<gpio::InputOutput>,
     sleep_pin: gpio::Gpio7<gpio::Output>,
     pwr_led_pin: gpio::Gpio4<gpio::Output>,
     dbg_led_pin: gpio::Gpio19<gpio::Output>,
@@ -68,22 +70,23 @@ impl IOPins {
         let sense_pin = pins.gpio8.into_input().unwrap();
         let host_on = sense_pin.is_high().unwrap();
 
-        let qdel_pin = pins.gpio10.into_input().unwrap();
+        let mut qdel_pin = pins.gpio10
+            .into_input_output_od().expect("QDEL now IO")
+            .into_floating().expect("QDEL floating");
+
+        if host_on {
+            info!("iopins: host is on");
+        } else {
+            info!("iopins: host is off");
+
+            // Prevent the initial system boot by forcing QDEL low.
+            qdel_pin.set_pull_down().expect("QDEL PD").set_low().unwrap();
+        }
+
         let mut sleep_pin = pins.gpio7.into_output().unwrap();
         sleep_pin.set_high().unwrap();
 
         let mut pwr_set_pin = pins.gpio1.into_output_od().unwrap();
-
-        // If host is on (e.g. 3v3 rail is on) then keep power rail on
-        if host_on {
-            // qdel_pin.set_high().unwrap();
-            // sleep_pin.set_high().unwrap();
-            info!("iopins: host is on");
-        } else {
-            // qdel_pin.set_low().unwrap();
-            // sleep_pin.set_low().unwrap();
-            info!("iopins: host is off");
-        }
 
         IOPins {
             pwr_set_pin: pwr_set_pin,
@@ -161,9 +164,14 @@ impl IOPins {
         self.sense_pin.is_low().unwrap()
     }
 
-    fn is_qdel_on(&self) -> bool {
-        self.qdel_pin.is_high().unwrap()   
+    fn qdel_release(&mut self) {
+        self.qdel_pin.set_floating().expect("QDEL release floating").set_high().unwrap();
     }
+
+    fn is_qdel_set_low(&self) -> bool {
+        self.qdel_pin.is_set_low().unwrap()
+    }
+
 }
 
 lazy_static! {
@@ -198,7 +206,7 @@ struct Suspending {
 
 #[derive(Debug)]
 struct Suspended {
-    button_press: bool
+    button_press: bool,
 }
 
 #[derive(Debug)]
@@ -281,8 +289,14 @@ impl State for Starting {
         PWR_LED_OFF_TIME.store(100, Ordering::Relaxed);
         PWR_LED_ON_TIME.store(100, Ordering::Relaxed);
 
-        // Turn on SOM regulators
-        IOPINS.write().unwrap().host_power_assert();
+        if IOPINS.write().unwrap().is_qdel_set_low() {
+            info!("starting: releasing QDEL");
+            IOPINS.write().unwrap().qdel_release();
+        } else {
+            // Turn on SOM regulators
+            info!("starting: asserting power");
+            IOPINS.write().unwrap().host_power_assert();
+        }
 
         // Start booting timer
         self.started_at = AtomicSystemTime::now_millis();
